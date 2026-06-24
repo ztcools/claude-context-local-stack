@@ -24,7 +24,7 @@
 
 ```bash
 # 1. 拉取仓库
-git clone <本仓库地址> && cd <仓库目录>
+git clone https://github.com/ztcools/claude-context-local-stack.git && cd claude-context-local-stack
 
 # 2. 生成并编辑配置(至少改 MinIO 凭据)
 cp .env.example .env
