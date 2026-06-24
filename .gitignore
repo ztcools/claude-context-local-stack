@@ -1,0 +1,12 @@
+# 本地配置(含密钥),禁止提交
+.env
+
+# 运行时数据目录
+data/
+ollama-data/
+ollama-data-new/
+volumes/
+
+# 系统/编辑器杂项
+.DS_Store
+*.log

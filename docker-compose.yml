@@ -1,0 +1,144 @@
+# =============================================================================
+# claude-context 本地向量检索后端 —— 一体化部署模板
+#
+# 包含三大服务、共 6 个容器:
+#   1. Milvus 向量数据库:  milvus-etcd / milvus-minio / milvus-standalone
+#   2. Ollama 向量化推理:   ollama  (GPU,模型 nomic-embed-text)
+#   3. Attu Milvus 控制台:  attu    (Web UI)
+#
+# 所有可变项都通过 .env 注入(见 .env.example)。带 ${VAR:-默认值} 的写法
+# 表示:未配置时使用默认值,因此最小情况下复制 .env.example 即可启动。
+# 一键部署请使用 ./deploy.sh(会自动拉镜像、拉模型、再启动)。
+# =============================================================================
+
+services:
+  # --------------------------------------------------------------------------
+  # Milvus 依赖:etcd(元数据) + minio(对象存储)
+  # --------------------------------------------------------------------------
+  etcd:
+    container_name: ${PROJECT_PREFIX:-claude}-milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.25
+    restart: unless-stopped
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ${DATA_DIR:-./data}/etcd:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio:
+    container_name: ${PROJECT_PREFIX:-claude}-milvus-minio
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    restart: unless-stopped
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?请在 .env 中设置 MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?请在 .env 中设置 MINIO_SECRET_KEY}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - ${DATA_DIR:-./data}/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # --------------------------------------------------------------------------
+  # Milvus standalone:对外提供 gRPC 19530 / 健康检查 9091
+  # --------------------------------------------------------------------------
+  standalone:
+    container_name: ${PROJECT_PREFIX:-claude}-milvus-standalone
+    image: milvusdb/milvus:v2.6.18
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MQ_TYPE: woodpecker
+    volumes:
+      - ${DATA_DIR:-./data}/milvus:/var/lib/milvus
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"
+      - "${MILVUS_METRICS_PORT:-9091}:9091"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # --------------------------------------------------------------------------
+  # Attu:Milvus 的 Web 控制台。挂载 assets/attu-env.sh 用于汉化/精简界面。
+  # 同一 compose 网络内,直接用服务名 standalone:19530 访问 Milvus(服务端调用)。
+  # 若要连接外部 Milvus,把 MILVUS_URL 改成 宿主机IP:19530。
+  # --------------------------------------------------------------------------
+  attu:
+    container_name: ${PROJECT_PREFIX:-claude}-attu
+    image: zilliz/attu:v2.6.5
+    restart: unless-stopped
+    ports:
+      - "${ATTU_PORT:-18000}:3000"
+    environment:
+      MILVUS_URL: ${MILVUS_URL:-standalone:19530}
+    volumes:
+      - ./assets/attu-env.sh:/app/build/env.sh:ro
+    depends_on:
+      standalone:
+        condition: service_healthy
+
+  # --------------------------------------------------------------------------
+  # Ollama:向量化(embedding)推理服务。默认走 NVIDIA GPU。
+  # 部署后需拉取模型(deploy.sh 会自动执行):ollama pull ${EMBED_MODEL}
+  # 纯 CPU 服务器:删除下方整个 deploy: 段即可。
+  # --------------------------------------------------------------------------
+  ollama:
+    container_name: ${PROJECT_PREFIX:-claude}-ollama
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11435}:11434"
+    volumes:
+      - ${OLLAMA_DATA:-./data/ollama}:/root/.ollama
+    environment:
+      OLLAMA_HOST: 0.0.0.0
+      OLLAMA_KEEP_ALIVE: 24h
+      OLLAMA_LOAD_TIMEOUT: 10m
+      OLLAMA_CONTEXT_LENGTH: 2048
+      OLLAMA_FLASH_ATTENTION: "true"
+      OLLAMA_NO_UPDATE_CHECK: "true"
+      OLLAMA_NOPRUNE: "true"
+      OLLAMA_GPU_MEMORY_FACTOR: "0.9"
+      OLLAMA_PARALLEL_REQUESTS: ${OLLAMA_PARALLEL_REQUESTS:-32}
+      OLLAMA_MAX_BATCH_SIZE: ${OLLAMA_MAX_BATCH_SIZE:-1024}
+      OLLAMA_SCHED_SPREAD: "false"
+      OLLAMA_NUM_GPUS: ${OLLAMA_NUM_GPUS:-1}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-8}
+      OLLAMA_CPU_THREADS: ${OLLAMA_CPU_THREADS:-16}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${OLLAMA_GPU_COUNT:-all}
+              capabilities: [gpu]
+
+# 单一默认网络,服务间通过容器名互相访问(etcd/minio/standalone/ollama)。
+networks:
+  default:
+    name: ${PROJECT_PREFIX:-claude}-net
