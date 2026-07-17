@@ -1,20 +1,16 @@
 # =============================================================================
-# claude-context 本地向量检索后端 —— 一体化部署模板
+# claude-context 一体化部署 —— 四大服务
+#   1. Milvus 向量数据库:  etcd / minio / standalone
+#   2. Ollama 向量化推理:   ollama (GPU, 模型 nomic-embed-text)
+#   3. git-index 定时索引:  git-index (每日 pull/clone GitLab 仓库并增量索引 main)
+#   4. PhiGent Web 控制台:  phigent (Milvus 管理 + 索引树 + GitLab 仓库管理)
 #
-# 包含三大服务、共 6 个容器:
-#   1. Milvus 向量数据库:  milvus-etcd / milvus-minio / milvus-standalone
-#   2. Ollama 向量化推理:   ollama  (GPU,模型 nomic-embed-text)
-#   3. Attu Milvus 控制台:  attu    (Web UI)
-#
-# 所有可变项都通过 .env 注入(见 .env.example)。带 ${VAR:-默认值} 的写法
-# 表示:未配置时使用默认值,因此最小情况下复制 .env.example 即可启动。
-# 一键部署请使用 ./deploy.sh(会自动拉镜像、拉模型、再启动)。
+# 自建镜像(phigent / git-index)由 deploy.sh 从 ./images/*.tar.gz 加载,
+# 基础镜像(milvus/ollama 等)使用本机已有镜像,均不联网拉取。
+# 变量见 .env.example。服务间用容器名互访(standalone:19530 / ollama:11434)。
 # =============================================================================
 
 services:
-  # --------------------------------------------------------------------------
-  # Milvus 依赖:etcd(元数据) + minio(对象存储)
-  # --------------------------------------------------------------------------
   etcd:
     container_name: ${PROJECT_PREFIX:-claude}-milvus-etcd
     image: quay.io/coreos/etcd:v3.5.25
@@ -38,8 +34,8 @@ services:
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z
     restart: unless-stopped
     environment:
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?请在 .env 中设置 MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?请在 .env 中设置 MINIO_SECRET_KEY}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
     ports:
       - "${MINIO_API_PORT:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
@@ -52,9 +48,6 @@ services:
       timeout: 20s
       retries: 3
 
-  # --------------------------------------------------------------------------
-  # Milvus standalone:对外提供 gRPC 19530 / 健康检查 9091
-  # --------------------------------------------------------------------------
   standalone:
     container_name: ${PROJECT_PREFIX:-claude}-milvus-standalone
     image: milvusdb/milvus:v2.6.18
@@ -83,33 +76,10 @@ services:
       minio:
         condition: service_healthy
 
-  # --------------------------------------------------------------------------
-  # Attu:Milvus 的 Web 控制台。挂载 assets/attu-env.sh 用于汉化/精简界面。
-  # 同一 compose 网络内,直接用服务名 standalone:19530 访问 Milvus(服务端调用)。
-  # 若要连接外部 Milvus,把 MILVUS_URL 改成 宿主机IP:19530。
-  # --------------------------------------------------------------------------
-  attu:
-    container_name: ${PROJECT_PREFIX:-claude}-attu
-    image: zilliz/attu:v2.6.5
-    restart: unless-stopped
-    ports:
-      - "${ATTU_PORT:-18000}:3000"
-    environment:
-      MILVUS_URL: ${MILVUS_URL:-standalone:19530}
-    volumes:
-      - ./assets/attu-env.sh:/app/build/env.sh:ro
-    depends_on:
-      standalone:
-        condition: service_healthy
-
-  # --------------------------------------------------------------------------
-  # Ollama:向量化(embedding)推理服务。默认走 NVIDIA GPU。
-  # 部署后需拉取模型(deploy.sh 会自动执行):ollama pull ${EMBED_MODEL}
-  # 纯 CPU 服务器:删除下方整个 deploy: 段即可。
-  # --------------------------------------------------------------------------
   ollama:
     container_name: ${PROJECT_PREFIX:-claude}-ollama
     image: ollama/ollama:latest
+    pull_policy: never
     restart: unless-stopped
     ports:
       - "${OLLAMA_PORT:-11435}:11434"
@@ -138,7 +108,54 @@ services:
               count: ${OLLAMA_GPU_COUNT:-all}
               capabilities: [gpu]
 
-# 单一默认网络,服务间通过容器名互相访问(etcd/minio/standalone/ollama)。
+  git-index:
+    container_name: ${PROJECT_PREFIX:-claude}-git-index
+    image: claude-context-git-index:latest
+    pull_policy: never
+    restart: unless-stopped
+    user: "${GIT_INDEX_UID:-1015}:${GIT_INDEX_GID:-1015}"
+    ports:
+      - "${GIT_INDEX_PORT:-8795}:8790"
+    volumes:
+      - ${GIT_INDEX_DATA:-./data/git-index}:/workdir
+    environment:
+      HOME: /tmp
+      EMBEDDING_PROVIDER: Ollama
+      OLLAMA_HOST: http://ollama:11434
+      EMBEDDING_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      EMBEDDING_DIMENSION: ${EMBED_DIMENSION:-768}
+      MILVUS_ADDRESS: standalone:19530
+      EMBEDDING_CACHE_ENABLED: "true"
+      GIT_INCREMENTAL_ENABLED: "true"
+      GIT_LAYERED_ENABLED: "true"
+      GIT_DELTA_MAX_FILES: "2000"
+      GIT_SSL_NO_VERIFY: ${GIT_SSL_NO_VERIFY:-false}
+      GIT_INDEX_SOURCE: config
+      GIT_INDEX_WORKDIR: /workdir/repos
+      GIT_INDEX_CONFIG_FILE: /workdir/git-index-config.json
+      GIT_INDEX_RUN_ON_START: "false"
+      GIT_INDEX_DAILY_HOUR: ${GIT_INDEX_DAILY_HOUR:-3}
+      GIT_INDEX_HTTP_PORT: "8790"
+    depends_on:
+      standalone:
+        condition: service_healthy
+
+  phigent:
+    container_name: ${PROJECT_PREFIX:-claude}-phigent
+    image: claude-phigent:latest
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "${PHIGENT_PORT:-18000}:3000"
+    environment:
+      MILVUS_URL: ${MILVUS_URL:-standalone:19530}
+      GIT_INDEX_PORT: ${GIT_INDEX_PORT:-8795}
+    volumes:
+      - ./assets/phigent-env.sh:/app/build/env.sh:ro
+    depends_on:
+      standalone:
+        condition: service_healthy
+
 networks:
   default:
     name: ${PROJECT_PREFIX:-claude}-net

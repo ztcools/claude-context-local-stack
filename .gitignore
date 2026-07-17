@@ -7,6 +7,9 @@ ollama-data/
 ollama-data-new/
 volumes/
 
+# 自建镜像 tar(体积大,不提交)
+images/
+
 # 系统/编辑器杂项
 .DS_Store
 *.log
