@@ -86,12 +86,17 @@ Ollama 地址指向 `http://<宿主机IP>:11435` 即可。
 2. **开发**：写代码、改文件。本地**图索引实时**（工作区变更自动增量重建），
    新增符号改完即可被 search 命中；向量索引按设计**不实时**（仅保护分支每日更新），
    开发者本地 diff 代码 LLM 本就清楚，无需实时向量化。
-3. **search**：agent 自行判断三种模式，用户无感知：
-   - `both`（默认）= 云端向量 + 本地图，理解流程/陌生代码；
-   - `vector` = 找具体实现；`graph` = 追调用关系/影响面/死代码（低成本拿调用链）。
+3. **search**：agent 按**触发规则**自行判断（用户无感知），search 输出头会标注
+   仓库规模 `[repo: N files, small/medium/large]` 辅助决策：
+   - **关系问题**（谁调用/影响面/死代码/入口）→ `graph`（任意规模，~200 tok，grep 答不了）。
+   - **大库**（>2000 文件）且不知位置 → `both`（向量+图）。
+   - **只知概念不知标识符** → `vector`。
+   - **小库**（<300 文件）/已知符号 → 直接 Grep/Read（search 输出头会提示"grep/read 更省"）。
 
 > search 是"定位 + 结构导航"的第一跳，**不是** Read/Grep 的替代品：
-> 大库/陌生库/关系问题优先 search；小库/已知符号优先 Grep/Read（实测见 claude-context 评估报告）。
+> 大库/陌生库/关系问题优先 search；小库/已知符号优先 Grep/Read。
+> 成本从低到高：graph(~200t) < compact(~340t) < limit:5(~2800t) < both(~4400t)。
+> 文档/测试类查询用 `docs:true` / `tests:true` 关闭降权。详见 claude-context 评估报告。
 
 ### git-index 服务端仓库配置
 
