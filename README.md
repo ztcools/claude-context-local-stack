@@ -77,12 +77,28 @@ http://<宿主机IP>:18000
 在 claude-context 客户端侧，将 Milvus 地址指向 `<宿主机IP>:19530`、
 Ollama 地址指向 `http://<宿主机IP>:11435` 即可。
 
-### git-index 仓库配置
+### 开发者侧工作流（link → search，全自动）
 
-在 PhiGent 控制台的「GitLab 仓库」页面配置索引仓库列表。git-index 服务会：
-- 每日定时(默认凌晨 3 点)从 GitLab 拉取仓库
-- 只索引 main/master 分支（root collection）
-- 开发者 MCP 端做 delta 索引（变更文件），搜索时 dev ⊕ root 两层合并
+开发者在要开发的仓库里打开 Claude，只需一次 `link` 绑定云端保护分支（如 `main`），
+之后**无需任何手动索引**——本地禁止向量索引（`index` 工具已移除），一切自动：
+
+1. **link**：绑定云端 collection（向量）+ **后台自动构建本地调用图索引**（图索引随 link 一并执行，用户无感知）。
+2. **开发**：写代码、改文件。本地**图索引实时**（工作区变更自动增量重建），
+   新增符号改完即可被 search 命中；向量索引按设计**不实时**（仅保护分支每日更新），
+   开发者本地 diff 代码 LLM 本就清楚，无需实时向量化。
+3. **search**：agent 自行判断三种模式，用户无感知：
+   - `both`（默认）= 云端向量 + 本地图，理解流程/陌生代码；
+   - `vector` = 找具体实现；`graph` = 追调用关系/影响面/死代码（低成本拿调用链）。
+
+> search 是"定位 + 结构导航"的第一跳，**不是** Read/Grep 的替代品：
+> 大库/陌生库/关系问题优先 search；小库/已知符号优先 Grep/Read（实测见 claude-context 评估报告）。
+
+### git-index 服务端仓库配置
+
+在 PhiGent 控制台的「GitLab 仓库」页面（或直接调 `:8795` 管理 API）配置索引仓库列表。git-index 服务会：
+- 每日定时(默认凌晨 3 点)拉取配置的仓库
+- 只索引保护分支（main/master 及 `protectedBranches`），写入 Milvus collection
+- 开发者 `link` 即绑定该 collection 只读检索；本地不产生向量写操作
 
 ## 七、目录结构
 
