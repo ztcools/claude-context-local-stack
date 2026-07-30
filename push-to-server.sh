@@ -38,15 +38,24 @@ for a in "$@"; do
 done
 
 # ---- SSH 连接复用：一次密码，全程共用 --------------------------------------
+# 优先公钥；没配公钥时，若 SSHPASS 环境变量存在且装了 sshpass 则用它（非交互，
+# 适合脚本/CI）。两者都没有时 ssh 会在终端上正常提示输密码。
 CTL="${TMPDIR:-/tmp}/cc-push-$$"
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new
           -o ControlMaster=auto -o "ControlPath=$CTL" -o ControlPersist=600
           -o ConnectTimeout=15)
+PASS_WRAP=()
+if [[ -n "${SSHPASS:-}" ]] && command -v sshpass >/dev/null 2>&1; then
+  PASS_WRAP=(sshpass -e)
+  info "使用 SSHPASS 环境变量认证（密码不进命令行）"
+fi
 cleanup() { ssh -O exit -o "ControlPath=$CTL" "$REMOTE_USER@$REMOTE_HOST" 2>/dev/null || true; }
 trap cleanup EXIT
 
-rsh() { ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" "$@"; }
-rcp() { scp "${SSH_OPTS[@]}" "$@"; }
+# 服务器 OpenSSH 版本较老，每条连接都会打后量子握手警告，滤掉以免淹没真实输出
+FILTER='post-quantum|store now, decrypt later|openssh.com/pq|^\*\*$'
+rsh() { "${PASS_WRAP[@]}" ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" "$@" 2> >(grep -Ev "$FILTER" >&2); }
+rcp() { "${PASS_WRAP[@]}" scp "${SSH_OPTS[@]}" "$@" 2> >(grep -Ev "$FILTER" >&2); }
 
 R="$REMOTE_USER@$REMOTE_HOST"
 
