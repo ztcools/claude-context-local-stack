@@ -1,0 +1,45 @@
+# =============================================================================
+# Milvus 覆盖配置 —— 挂载到 /milvus/configs/user.yaml
+#
+# Milvus 启动时先读 milvus.yaml，再用同目录的 user.yaml 做「深合并」覆盖（官方
+# 推荐的改配置方式）。这里只写需要偏离默认值的键，其余保持镜像自带默认，升级
+# 镜像时不会因为我们复制了整份 milvus.yaml 而丢掉新默认值。
+#
+# 为什么需要它：本项目的访问模式是「集合极多、单集合不大、同一时刻只搜少数几个」
+#   - 一个 repo × 一个保护分支 = 一个 collection，几百个仓库会有上千个 collection
+#   - 每行约 10 KB（content 是 VarChar(65535) 的源码切片，标量字段才是内存大头）
+#   - Milvus 里 collection 必须 load 才能搜，而**默认永不卸载**
+# 实测 15 个 collection / 约 12 万行就占了 1.19 GiB；按上千 collection 线性外推
+# 是上百 GB 常驻内存。这台机器是和别人共用的（其他容器已占用近 140 GiB），所以
+# 内存必须封住上限。
+#
+# 两个方向同时做：
+#   1. 服务端（这里）：标量数据/标量索引/growing segment 全部走 mmap，让操作系统
+#      page cache 顶上去，冷数据自然回落到磁盘。数据盘是 NVMe，随机读代价很低。
+#   2. 客户端（git-index-service）：每写完一个 collection 立刻 releaseCollection，
+#      索引任务不再把所有 collection 钉在内存里；搜索侧命中未加载会自动重载。
+# =============================================================================
+
+queryNode:
+  mmap:
+    # 向量原始数据：默认已 mmap，显式写出来表明这是刻意保留的。
+    vectorField: true
+    # 向量索引（HNSW 图）留在内存：它是搜索延迟的决定项，mmap 化会让 P99 明显变差。
+    # 只有当内存仍然吃紧到无法接受时才考虑改成 true。
+    vectorIndex: false
+    # 标量字段 = content/relativePath/metadata 等源码文本，是本项目真正的内存大头，
+    # 而搜索只在返回结果时才读它们（不参与打分）→ mmap 收益最大、代价最小。
+    scalarField: true
+    # 标量索引（含 BM25 稀疏检索的倒排结构）同样 mmap 化。
+    scalarIndex: true
+    # 刚写入、还没 seal 的 growing segment 也 mmap：夜间全量 pass 会同时产生很多
+    # growing segment，这是尖峰内存的主要来源。
+    growingMmapEnabled: true
+    # mmap 临时文件最多用到数据盘的这个百分比（默认 50）。数据盘 3.4T 且专供本栈，
+    # 留够余量给别人。
+    maxDiskUsagePercentageForMmapAlloc: 50
+  # lazyload 故意保持关闭：它能进一步省内存，但第一次搜索会等待 segment 换入
+  # （waitTimeout 默认 30s），对交互式 search 是不可接受的抖动。
+  # 常驻集合数量已经由「索引后立即 release」控住，不需要再靠 lazyload 兜底。
+  lazyload:
+    enabled: false

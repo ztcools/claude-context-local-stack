@@ -8,6 +8,12 @@
 # 自建镜像(phigent / git-index)由 deploy.sh 从 ./images/*.tar.gz 加载,
 # 基础镜像(milvus/ollama 等)使用本机已有镜像,均不联网拉取。
 # 变量见 .env.example。服务间用容器名互访(standalone:19530 / ollama:11434)。
+#
+# 资源上限(deploy.resources.limits)
+#   这台机器是共享的(96 核 / 376 GiB, 其他团队的容器也在上面跑)。所有服务都显式
+#   封了内存和 CPU 上限,目的不是"省资源",而是把故障半径关在本栈内部: 一个失控
+#   的索引任务应该是自己 OOM 被重启,而不是把整机拖垮、连带别人的容器被杀。
+#   默认值合计约 126 GiB / 60 核,留出三分之二余量给其他人。用 .env 覆盖即可调整。
 # =============================================================================
 
 services:
@@ -28,6 +34,13 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          # etcd 只存元数据(collection schema / segment 索引),量很小;
+          # 上限主要防 compaction 期间的尖峰。
+          memory: ${ETCD_MEM_LIMIT:-4g}
+          cpus: "${ETCD_CPU_LIMIT:-2}"
 
   minio:
     container_name: ${PROJECT_PREFIX:-claude}-milvus-minio
@@ -47,6 +60,12 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          # 对象存储层:内存用于上传缓冲,不随数据量线性增长。
+          memory: ${MINIO_MEM_LIMIT:-8g}
+          cpus: "${MINIO_CPU_LIMIT:-4}"
 
   standalone:
     container_name: ${PROJECT_PREFIX:-claude}-milvus-standalone
@@ -61,6 +80,9 @@ services:
       MQ_TYPE: woodpecker
     volumes:
       - ${DATA_DIR:-./data}/milvus:/var/lib/milvus
+      # 覆盖配置:标量数据/索引/growing segment 走 mmap,把"集合极多"场景的常驻
+      # 内存压到磁盘。见 assets/milvus-user.yaml 里的完整推导。
+      - ./assets/milvus-user.yaml:/milvus/configs/user.yaml:ro
     ports:
       - "${MILVUS_PORT:-19530}:19530"
       - "${MILVUS_METRICS_PORT:-9091}:9091"
@@ -70,6 +92,14 @@ services:
       start_period: 90s
       timeout: 20s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          # 全栈最大的内存消耗方(query node 常驻 + growing segment)。配合
+          # user.yaml 的 mmap 后实际占用远低于此;上限是"别人的容器不会被我们
+          # 拖死"的硬保证。
+          memory: ${MILVUS_MEM_LIMIT:-64g}
+          cpus: "${MILVUS_CPU_LIMIT:-24}"
     depends_on:
       etcd:
         condition: service_healthy
@@ -102,6 +132,10 @@ services:
       OLLAMA_CPU_THREADS: ${OLLAMA_CPU_THREADS:-16}
     deploy:
       resources:
+        limits:
+          # 向量化在 GPU 上跑,容器内存主要是请求缓冲和模型加载暂存。
+          memory: ${OLLAMA_MEM_LIMIT:-32g}
+          cpus: "${OLLAMA_CPU_LIMIT:-16}"
         reservations:
           devices:
             - driver: nvidia
@@ -136,6 +170,19 @@ services:
       GIT_INDEX_RUN_ON_START: "false"
       GIT_INDEX_DAILY_HOUR: ${GIT_INDEX_DAILY_HOUR:-3}
       GIT_INDEX_HTTP_PORT: "8790"
+      # 同时索引几个仓库。瓶颈是 Ollama 向量化而不是 CPU,所以别开太大:
+      # 超过 OLLAMA_NUM_PARALLEL 之后只会互相排队,总时长不降反升。
+      GIT_INDEX_CONCURRENCY: ${GIT_INDEX_CONCURRENCY:-3}
+      # 每个 collection 写完就从 Milvus 内存里 release(见 milvus-user.yaml 的说明)。
+      # 只有在"索引完立刻要搜"的调试场景才需要关掉。
+      GIT_INDEX_RELEASE_AFTER: ${GIT_INDEX_RELEASE_AFTER:-true}
+    deploy:
+      resources:
+        limits:
+          # 每个并发 worker 一份 checkout + 分块/向量化流水线。上限按
+          # GIT_INDEX_CONCURRENCY 调整:大致每个 worker 预留 4~5 GiB。
+          memory: ${GIT_INDEX_MEM_LIMIT:-16g}
+          cpus: "${GIT_INDEX_CPU_LIMIT:-12}"
     depends_on:
       standalone:
         condition: service_healthy
@@ -152,6 +199,12 @@ services:
       GIT_INDEX_PORT: ${GIT_INDEX_PORT:-8795}
     volumes:
       - ./assets/phigent-env.sh:/app/build/env.sh:ro
+    deploy:
+      resources:
+        limits:
+          # 纯 Node 前端 + Milvus 代理,常驻很小。
+          memory: ${PHIGENT_MEM_LIMIT:-2g}
+          cpus: "${PHIGENT_CPU_LIMIT:-2}"
     depends_on:
       standalone:
         condition: service_healthy

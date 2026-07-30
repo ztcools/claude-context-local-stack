@@ -70,6 +70,11 @@ load_image "claude-context-git-index:latest"  "claude-git-index.tar.gz"
 # ---- 4. 启动(基础镜像用本机已有;compose 已设 pull_policy: never)----------
 # 挂载给容器执行的脚本需可执行权限(bind mount 会覆盖镜像内权限)。
 chmod +x assets/phigent-env.sh 2>/dev/null || true
+# bind-mount 的源文件若不存在,Docker 会在该路径建一个空目录;Milvus 把
+# /milvus/configs/user.yaml 当目录读会直接起不来。缺文件就明确报错。
+for f in assets/phigent-env.sh assets/milvus-user.yaml; do
+  [[ -f "$f" ]] || { err "缺少挂载文件 $f(compose 会误建为目录导致服务异常)。"; exit 1; }
+done
 info "启动服务..."
 $DC up -d
 
@@ -97,7 +102,7 @@ cat <<EOF
 
 访问入口(将 <宿主机IP> 换成本机地址):
   - PhiGent 控制台 : http://<宿主机IP>:${PHIGENT_PORT:-18000}
-  - GitLab 索引管理 : PhiGent 内“GitLab 仓库”页(直连 :${GIT_INDEX_PORT:-8795})
+  - 仓库索引管理    : PhiGent 内“代码仓库”页(直连 :${GIT_INDEX_PORT:-8795})
   - Milvus gRPC    : <宿主机IP>:${MILVUS_PORT:-19530}
   - Ollama API     : http://<宿主机IP>:${OLLAMA_PORT:-11435}
 EOF

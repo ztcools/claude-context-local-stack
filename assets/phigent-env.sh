@@ -10,17 +10,24 @@ echo "window._env_ = {" >> ./build/env-config.js
 
 if [[ -f ./build/.env ]]; then
   while read -r line || [[ -n "$line" ]]; do
-    if printf '%s\n' "$line" | grep -q -e '='; then
-      varname=$(printf '%s\n' "$line" | sed -e 's/=.*//')
-      varvalue=$(printf '%s\n' "$line" | sed -e 's/^[^=]*=//')
-      value=$(printf '%s\n' "${!varname}")
-      [[ -z $value ]] && value=${varvalue}
-      echo "  $varname: \"$value\"," >> ./build/env-config.js
-    fi
+    # 跳过空行和注释。注释本身可能带 '='（"# 留空 = 默认"），照原样写进对象字面量
+    # 会让 env-config.js 变成语法错误的 JS —— window._env_ 拿不到，整个控制台白屏。
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ "$line" != *=* ]] && continue
+    varname=${line%%=*}
+    varvalue=${line#*=}
+    # 只有合法标识符才能当 JS 对象的键。
+    [[ "$varname" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    value=$(printf '%s\n' "${!varname}")
+    [[ -z $value ]] && value=${varvalue}
+    echo "  $varname: \"$value\"," >> ./build/env-config.js
   done < ./build/.env
 fi
 
-# 显式注入 git-index 管理服务端口(前端 GitLab 仓库管理页直连使用)
-echo "  GIT_INDEX_PORT: \"${GIT_INDEX_PORT:-8795}\"," >> ./build/env-config.js
+# GIT_INDEX_PORT 由 build/.env 提供默认值、可被容器环境变量覆盖；
+# .env 缺这一项时（旧前端构建）才在这里兜底补上。
+if ! grep -q '^  GIT_INDEX_PORT:' ./build/env-config.js; then
+  echo "  GIT_INDEX_PORT: \"${GIT_INDEX_PORT:-8795}\"," >> ./build/env-config.js
+fi
 
 echo "}" >> ./build/env-config.js
