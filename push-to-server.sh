@@ -85,7 +85,7 @@ fi
 
 # ---- 需要补进服务器 .env 的键（缺失才追加，已有的绝不覆盖）------------------
 ENV_KEYS=(
-  "GIT_INDEX_CONCURRENCY=3"
+  "GIT_INDEX_CONCURRENCY=6"
   "GIT_INDEX_RELEASE_AFTER=true"
   "MILVUS_MEM_LIMIT=64g"      "MILVUS_CPU_LIMIT=24"
   "OLLAMA_MEM_LIMIT=32g"      "OLLAMA_CPU_LIMIT=16"
@@ -155,7 +155,8 @@ cat <<PLAN
 将对 $R:$REMOTE_DIR 执行：
   1. mkdir -p images assets                         （服务器旧栈没有 assets/）
   2. scp 上面 5 个文件（覆盖同名）
-  3. .env 补齐 ${#ENV_KEYS[@]} 个新键 —— 只追加缺失的，已有的不动；改前存 .env.bak-<日期>
+  3. .env 同步 ${#ENV_KEYS[@]} 个键 —— 缺失则追加、值不同则原地更新、一致则不动；
+     改前存 .env.bak-<日期>；人工加的其他键与注释不动
   4. docker tag 现有 git-index / phigent 为 backup-<日期>（回滚用）
   5. docker load 两个新镜像
   6. docker compose up -d  —— 只重建配置变了的容器；compose 只管本 project，
@@ -185,27 +186,41 @@ rsh "chmod +x '$REMOTE_DIR/deploy.sh'"
 info "上传完成"
 
 # =============================================================================
-# 3. 补 .env（幂等）
+# 3. 同步 .env（幂等）
+#
+# 三种情形分开处理 —— 早先只做"缺失才追加"，导致改了默认值（如
+# GIT_INDEX_CONCURRENCY 3→6）永远推不上去：键已存在就被当成"已是期望值"跳过了。
+#   缺失      → 追加
+#   值相同    → 不动
+#   值不同    → 原地替换（打印 旧→新，改前有 .env.bak-<日期>）
+# 只碰 ENV_KEYS 里这几个键，人工加的其他键与注释一概不动。
 # =============================================================================
-step "3/6 补齐 .env 新键"
+step "3/6 同步 .env"
 ENV_PATCH=$(printf '%s\n' "${ENV_KEYS[@]}")
 rsh "cd '$REMOTE_DIR'
   [[ -f .env ]] || { echo '.env 不存在，从 .env.example 复制并检查后再跑'; exit 1; }
   cp -n .env \".env.bak-\$(date +%Y%m%d)\" 2>/dev/null || true
-  added=0
+  added=0; updated=0
   while IFS= read -r kv; do
     [[ -z \"\$kv\" ]] && continue
-    k=\${kv%%=*}
-    if grep -qE \"^[[:space:]]*\$k=\" .env; then
-      printf '  已有  %s\n' \"\$k\"
-    else
+    k=\${kv%%=*}; v=\${kv#*=}
+    cur=\$(sed -nE \"s/^[[:space:]]*\$k=(.*)\\\$/\\1/p\" .env | tail -1)
+    if [[ -z \"\$cur\" ]] && ! grep -qE \"^[[:space:]]*\$k=\" .env; then
       printf '\n%s\n' \"\$kv\" >> .env
       printf '  追加  %s\n' \"\$kv\"; added=\$((added+1))
+    elif [[ \"\$cur\" == \"\$v\" ]]; then
+      printf '  一致  %s\n' \"\$kv\"
+    else
+      # awk 逐行替换：只改首个匹配行，值里的 & / \\ 都不参与正则，避免 sed 转义坑
+      awk -v k=\"\$k\" -v v=\"\$v\" '
+        !done && \$0 ~ \"^[[:space:]]*\" k \"=\" { print k \"=\" v; done=1; next } { print }
+      ' .env > .env.tmp\$\$ && mv .env.tmp\$\$ .env
+      printf '  更新  %s: %s → %s\n' \"\$k\" \"\$cur\" \"\$v\"; updated=\$((updated+1))
     fi
   done <<'EOF_ENV'
 $ENV_PATCH
 EOF_ENV
-  echo \"  → 新增 \$added 项\"
+  echo \"  → 追加 \$added 项，更新 \$updated 项\"
 "
 
 # =============================================================================

@@ -170,17 +170,18 @@ services:
       GIT_INDEX_RUN_ON_START: "false"
       GIT_INDEX_DAILY_HOUR: ${GIT_INDEX_DAILY_HOUR:-3}
       GIT_INDEX_HTTP_PORT: "8790"
-      # 同时索引几个仓库。瓶颈是 Ollama 向量化而不是 CPU,所以别开太大:
-      # 超过 OLLAMA_NUM_PARALLEL 之后只会互相排队,总时长不降反升。
-      GIT_INDEX_CONCURRENCY: ${GIT_INDEX_CONCURRENCY:-3}
+      # 同时索引几个仓库。瓶颈是 Ollama 向量化而不是 CPU:实测吞吐 1→3→6 流几乎
+      # 线性(27→75→136 embed/s),6 之后就平了(8 流 140、12 流 142),单流延迟却翻倍。
+      # 默认取饱和点 6;换机器后按 .env.example 里的测法重新定。
+      GIT_INDEX_CONCURRENCY: ${GIT_INDEX_CONCURRENCY:-6}
       # 每个 collection 写完就从 Milvus 内存里 release(见 milvus-user.yaml 的说明)。
       # 只有在"索引完立刻要搜"的调试场景才需要关掉。
       GIT_INDEX_RELEASE_AFTER: ${GIT_INDEX_RELEASE_AFTER:-true}
     deploy:
       resources:
         limits:
-          # 每个并发 worker 一份 checkout + 分块/向量化流水线。上限按
-          # GIT_INDEX_CONCURRENCY 调整:大致每个 worker 预留 4~5 GiB。
+          # 每个并发 worker 一份 checkout + 分块/向量化流水线。实测单 worker 峰值
+          # RSS 约 1 GiB(绝大部分是 tree-sitter 堆外缓冲),并发 6 最坏约 6 GiB。
           memory: ${GIT_INDEX_MEM_LIMIT:-16g}
           cpus: "${GIT_INDEX_CPU_LIMIT:-12}"
     depends_on:

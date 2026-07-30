@@ -155,11 +155,11 @@ minio ─(healthy)─┘                              phigent
 | `GIT_INDEX_UID/GID` | `1015` | git-index 运行用户 |
 | `PHIGENT_PORT` | `18000` | PhiGent Web 控制台端口 |
 | `MILVUS_URL` | `standalone:19530` | PhiGent 连接 Milvus 地址 |
-| `GIT_INDEX_CONCURRENCY` | `3` | 同时索引几个仓库（瓶颈是 Ollama 向量化，不是 CPU） |
+| `GIT_INDEX_CONCURRENCY` | `6` | 同时索引几个仓库。瓶颈是 Ollama 向量化不是 CPU；6 是实测饱和点（1/3/6/8/12 流 → 27/75/136/140/142 embed/s） |
 | `GIT_INDEX_RELEASE_AFTER` | `true` | 每个 collection 写完即从 Milvus 内存 release |
 | `MILVUS_MEM_LIMIT` / `MILVUS_CPU_LIMIT` | `64g` / `24` | 最大消耗方；配 mmap 后实际远低于上限 |
 | `OLLAMA_MEM_LIMIT` / `OLLAMA_CPU_LIMIT` | `32g` / `16` | 向量化推理 |
-| `GIT_INDEX_MEM_LIMIT` / `GIT_INDEX_CPU_LIMIT` | `16g` / `12` | 约每 worker 4~5 GiB，调 CONCURRENCY 时同步上调 |
+| `GIT_INDEX_MEM_LIMIT` / `GIT_INDEX_CPU_LIMIT` | `16g` / `12` | 实测单 worker 峰值 ~1 GiB（956 MiB 在堆外，V8 heap 仅 55 MiB），并发 6 最坏 ~6 GiB |
 | `MINIO_MEM_LIMIT` / `MINIO_CPU_LIMIT` | `8g` / `4` | |
 | `ETCD_MEM_LIMIT` / `ETCD_CPU_LIMIT` | `4g` / `2` | |
 | `PHIGENT_MEM_LIMIT` / `PHIGENT_CPU_LIMIT` | `2g` / `2` | |

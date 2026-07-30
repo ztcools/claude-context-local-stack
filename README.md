@@ -74,13 +74,29 @@ vi .env
 |------|------|-----|------|
 | Milvus standalone | 64g | 24 | 最大消耗方；配 mmap 后实际远低于上限 |
 | Ollama | 32g | 16 | 向量化推理 |
-| git-index | 16g | 12 | 约每个并发 worker 4~5 GiB |
+| git-index | 16g | 12 | 实测单 worker 峰值 ~1 GiB，并发 6 最坏 ~6 GiB |
 | MinIO | 8g | 4 | |
 | etcd | 4g | 2 | |
 | PhiGent | 2g | 2 | |
 
-`GIT_INDEX_CONCURRENCY`（默认 3）= 同时索引几个仓库。**瓶颈是 Ollama 向量化而不是 CPU**，
-超过 `OLLAMA_NUM_PARALLEL` 之后只会互相排队、总时长不降反升；调大它要同步上调 `GIT_INDEX_MEM_LIMIT`。
+`GIT_INDEX_CONCURRENCY`（默认 **6**）= 同时索引几个仓库。**瓶颈是 Ollama 向量化而不是 CPU**，
+所以这个值该由 embedding 吞吐定，不是由核数定。实测本栈 ollama（32g / 16cpu、4 卡共享）：
+
+| 并发流 | 吞吐 | 相对 1 流 | 单流延迟 |
+|--------|------|-----------|----------|
+| 1 | 27 embed/s | 1.00× | 37ms |
+| 3 | 75 | 2.74× | 40ms |
+| **6** | **136** | **4.98×** | 44ms |
+| 8 | 140 | 5.16× | 57ms |
+| 12 | 142 | 5.22× | 84ms |
+
+6 之后吞吐基本不动、单流延迟翻倍 —— 纯排队。所以默认取 6（早先的 3 只用到约 55% 的
+向量化能力）。**换机器或改了 `OLLAMA_NUM_PARALLEL` 就要重新测**，别照抄这张表。
+
+内存侧不必跟着线性上调：实测单 worker 峰值 RSS 约 1 GiB（ap-client-api，28.7K chunks），
+其中 956 MiB 是 tree-sitter 的**堆外**缓冲，V8 `heapUsed` 峰值只有 55 MiB。
+所以约束是 cgroup 上限而非 V8 old-space（4.1 GiB），不需要设 `NODE_OPTIONS`；
+并发 6 最坏约 6 GiB，`16g` 仍留 2.5× 余量。
 
 > **改了上限或 `milvus-user.yaml` 必须重建对应容器才生效**：
 > `docker compose up -d standalone`（不需要 `down`，只重建配置变了的容器）。
