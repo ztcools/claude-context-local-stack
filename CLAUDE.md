@@ -73,6 +73,19 @@ minio ─(healthy)─┘                              phigent
 - Ollama 模型数据独立目录 `OLLAMA_DATA`（默认 `./data/ollama`）
 - **重建容器绝不动 data 目录**——这是运维铁律
 
+### 内存控制（几百个仓库时的防崩前提）
+访问模式是「**集合极多、单集合不大、同一时刻只搜少数几个**」：一个仓库 × 一个保护分支 = 一个 collection，
+几百个仓库 → 上千个 collection。而 Milvus 里 collection 必须 load 才能搜、**默认永不卸载**——
+实测 15 个 collection / 约 12 万行就占 1.19 GiB，线性外推是上百 GB 常驻内存。三层同时做：
+
+1. **服务端 mmap**（`assets/milvus-user.yaml`）：标量数据/标量索引/growing segment 全 mmap，
+   冷数据回落 NVMe；**向量索引（HNSW）刻意留内存**——它决定搜索延迟，mmap 化会让 P99 明显变差。
+   `lazyload` 也刻意关闭：省内存但首查要等 segment 换入（默认 30s 超时），交互式 search 不可接受。
+2. **客户端写后 release**（`GIT_INDEX_RELEASE_AFTER=true`）：索引任务不把所有 collection 钉在内存里。
+   代价是冷 collection 首查多约 900ms（load），warm 后 ~220ms。
+3. **容器硬上限**（`*_MEM_LIMIT` / `*_CPU_LIMIT`）：任何一个服务失控也压不垮宿主机——
+   这台机器与他人共用（其他容器已占近 140 GiB）。
+
 ### 安全约束
 - `.env` 含 MinIO 凭据等密钥，`.gitignore` 已排除，禁止提交
 - `.env.example` 为模板，可安全提交（占位符值）
@@ -87,6 +100,9 @@ minio ─(healthy)─┘                              phigent
 ├── .env                 # 实际配置（gitignore，含密钥）
 ├── deploy.sh            # 一键部署脚本（唯一入口）
 ├── assets/
+│   ├── milvus-user.yaml # Milvus 覆盖配置 → /milvus/configs/user.yaml
+│   │                     #   Milvus 先读 milvus.yaml 再深合并 user.yaml，
+│   │                     #   所以这里只写要偏离默认的键（mmap 相关）
 │   └── phigent-env.sh   # PhiGent 启动钩子：注入前端运行时配置
 │                         #   → 生成 /app/build/env-config.js
 │                         #   → 注入 GIT_INDEX_PORT 等浏览器端需要的变量
@@ -109,9 +125,12 @@ minio ─(healthy)─┘                              phigent
 3. `source .env` → 创建数据目录（`mkdir -p`，幂等）
 4. 加载自建镜像：`gunzip -c images/*.tar.gz | docker load`（已存在则跳过）
 5. `chmod +x assets/phigent-env.sh`（bind mount 会覆盖镜像内权限）
-6. `docker compose up -d`（pull_policy: never，不联网）
-7. 等待 Ollama 就绪 → 检查 `nomic-embed-text` 模型 → 缺失才 `ollama pull`
-8. 打印服务状态 + 访问入口
+6. 校验挂载文件存在：`assets/phigent-env.sh`、`assets/milvus-user.yaml`
+   —— bind-mount 源文件缺失时 Docker 会在该路径**建空目录**，Milvus 把
+   `/milvus/configs/user.yaml` 当目录读会直接起不来，所以缺文件就明确报错
+7. `docker compose up -d`（pull_policy: never，不联网）
+8. 等待 Ollama 就绪 → 检查 `nomic-embed-text` 模型 → 缺失才 `ollama pull`
+9. 打印服务状态 + 访问入口
 
 **其他子命令**：`down`（停止+移除容器）、`logs`（跟踪日志）、`status`（容器状态）
 
@@ -136,6 +155,17 @@ minio ─(healthy)─┘                              phigent
 | `GIT_INDEX_UID/GID` | `1015` | git-index 运行用户 |
 | `PHIGENT_PORT` | `18000` | PhiGent Web 控制台端口 |
 | `MILVUS_URL` | `standalone:19530` | PhiGent 连接 Milvus 地址 |
+| `GIT_INDEX_CONCURRENCY` | `3` | 同时索引几个仓库（瓶颈是 Ollama 向量化，不是 CPU） |
+| `GIT_INDEX_RELEASE_AFTER` | `true` | 每个 collection 写完即从 Milvus 内存 release |
+| `MILVUS_MEM_LIMIT` / `MILVUS_CPU_LIMIT` | `64g` / `24` | 最大消耗方；配 mmap 后实际远低于上限 |
+| `OLLAMA_MEM_LIMIT` / `OLLAMA_CPU_LIMIT` | `32g` / `16` | 向量化推理 |
+| `GIT_INDEX_MEM_LIMIT` / `GIT_INDEX_CPU_LIMIT` | `16g` / `12` | 约每 worker 4~5 GiB，调 CONCURRENCY 时同步上调 |
+| `MINIO_MEM_LIMIT` / `MINIO_CPU_LIMIT` | `8g` / `4` | |
+| `ETCD_MEM_LIMIT` / `ETCD_CPU_LIMIT` | `4g` / `2` | |
+| `PHIGENT_MEM_LIMIT` / `PHIGENT_CPU_LIMIT` | `2g` / `2` | |
+
+> 资源上限与 `milvus-user.yaml` 都要**重建容器**才生效：`docker compose up -d standalone`。
+> 验证：`docker inspect claude-milvus-standalone --format '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}'`。
 
 ## 与 claude-context 主项目的关系
 
@@ -179,9 +209,15 @@ packages/git-index-service  定时索引 ──→ images/claude-git-index.tar.g
 # 1. 替换 ./images/claude-*.tar.gz
 # 2. ./deploy.sh   （deploy.sh 会重新 load + up）
 
+# 只重建改了配置的那几个容器（共用机器上优先用这个，不要 down 整栈）
+docker compose up -d standalone                  # 改了 milvus-user.yaml / MILVUS_*_LIMIT
+docker compose up -d git-index phigent           # 只换了自建镜像
+
 # 验证
 curl http://localhost:9091/healthz              # Milvus → OK
 docker exec claude-ollama ollama list            # → nomic-embed-text
+docker inspect claude-milvus-standalone --format '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}'
+docker stats --no-stream claude-milvus-standalone # mmap 生效后内存不随 collection 数线性涨
 ```
 
 ## 开发约定

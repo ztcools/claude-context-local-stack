@@ -8,8 +8,8 @@
 |------|------|------|------------------|
 | Milvus | `*-milvus-etcd` / `*-milvus-minio` / `*-milvus-standalone` | 向量数据库(etcd元数据+MinIO对象存储+standalone) | 19530(gRPC)、9091(metrics)、9000/9001(MinIO) |
 | Ollama | `*-ollama` | 向量化(embedding)推理，模型 `nomic-embed-text` | 11435 |
-| git-index | `*-git-index` | 定时索引服务：从 GitLab 拉取仓库 → 增量索引 main 分支 | 8795(HTTP 管理口) |
-| PhiGent | `*-phigent` | Web 控制台：Milvus 管理 + 索引树 + GitLab 仓库配置 | 18000 |
+| git-index | `*-git-index` | 定时索引服务：拉取仓库 → 增量索引保护分支(支持华为云 CodeHub / GitLab / GitHub，按 URL 自动区分认证) | 8795(HTTP 管理口) |
+| PhiGent | `*-phigent` | Web 控制台：Milvus 管理 + 索引树 + 仓库配置 | 18000 |
 
 > 容器名前缀 `*` 由 `.env` 里的 `PROJECT_PREFIX` 决定(默认 `claude`)。
 
@@ -19,6 +19,8 @@
 - 当前用户有 docker 权限(在 `docker` 用户组，无需 sudo)
 - **GPU 部署**：需安装 NVIDIA 驱动 + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)，确保 `docker run --gpus all ...` 可用
 - **纯 CPU 部署**：删除 `docker-compose.yml` 中 `ollama` 服务下的整个 `deploy:` 段即可(速度较慢)
+- **与他人共用的机器**：所有服务都设了内存/CPU 上限(见第五节)，不封上限时 Milvus 会随 collection 数
+  线性吃内存直到把机器占满
 
 ## 三、部署步骤
 
@@ -52,7 +54,39 @@ vi .env
 | `MILVUS_URL` | PhiGent 连接的 Milvus 地址；同机部署保持默认，连外部 Milvus 改为 `宿主机IP:19530` | 按需 |
 | `EMBED_MODEL` | 嵌入模型名，默认 `nomic-embed-text` | 一般不改 |
 
-## 五、常用命令
+## 五、资源与内存控制（几百个仓库时的防崩关键）
+
+访问模式是「**集合极多、单集合不大、同一时刻只搜少数几个**」：一个仓库 × 一个保护分支 = 一个 collection，
+几百个仓库会有上千个 collection。而 Milvus 里 collection 必须 load 才能搜，**默认永不卸载**——
+实测 15 个 collection / 约 12 万行就占 1.19 GiB，按上千 collection 线性外推是上百 GB 常驻内存。
+
+三层措施同时生效：
+
+| 层 | 措施 | 在哪配 |
+|----|------|--------|
+| Milvus 服务端 | 标量数据/标量索引/growing segment 全走 **mmap**，冷数据回落磁盘(NVMe 随机读代价低)；向量索引(HNSW)仍留内存以保延迟 | `assets/milvus-user.yaml`（挂载为 `/milvus/configs/user.yaml`） |
+| 索引客户端 | 每写完一个 collection 立刻 `releaseCollection`，索引任务不把所有 collection 钉在内存里 | `.env` 的 `GIT_INDEX_RELEASE_AFTER=true` |
+| 容器层 | 每个服务硬上限，任何一个失控也压不垮宿主机 | `.env` 的 `*_MEM_LIMIT` / `*_CPU_LIMIT` |
+
+默认上限（按 64 核 / 256G 且与他人共用的机器给的，按自己机器调）：
+
+| 服务 | 内存 | CPU | 说明 |
+|------|------|-----|------|
+| Milvus standalone | 64g | 24 | 最大消耗方；配 mmap 后实际远低于上限 |
+| Ollama | 32g | 16 | 向量化推理 |
+| git-index | 16g | 12 | 约每个并发 worker 4~5 GiB |
+| MinIO | 8g | 4 | |
+| etcd | 4g | 2 | |
+| PhiGent | 2g | 2 | |
+
+`GIT_INDEX_CONCURRENCY`（默认 3）= 同时索引几个仓库。**瓶颈是 Ollama 向量化而不是 CPU**，
+超过 `OLLAMA_NUM_PARALLEL` 之后只会互相排队、总时长不降反升；调大它要同步上调 `GIT_INDEX_MEM_LIMIT`。
+
+> **改了上限或 `milvus-user.yaml` 必须重建对应容器才生效**：
+> `docker compose up -d standalone`（不需要 `down`，只重建配置变了的容器）。
+> 验证：`docker inspect claude-milvus-standalone --format '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}'`。
+
+## 六、常用命令
 
 ```bash
 ./deploy.sh            # 部署 / 更新
@@ -61,7 +95,7 @@ vi .env
 ./deploy.sh down       # 停止并移除容器(数据保留在 DATA_DIR)
 ```
 
-## 六、验证
+## 七、验证
 
 ```bash
 # Milvus 健康
@@ -95,17 +129,30 @@ Ollama 地址指向 `http://<宿主机IP>:11435` 即可。
 
 > search 是"定位 + 结构导航"的第一跳，**不是** Read/Grep 的替代品：
 > 大库/陌生库/关系问题优先 search；小库/已知符号优先 Grep/Read。
-> 成本从低到高：graph(~200t) < compact(~340t) < limit:5(~2800t) < both(~4400t)。
+> 成本从低到高：graph(~300t) < compact(~340t) < vector(~1700t) < both(~2200t)。
 > 文档/测试类查询用 `docs:true` / `tests:true` 关闭降权。详见 claude-context 评估报告。
+
+**实测（2026-07-30，两个真实 C++ 仓库，36 个期望符号，warm）**：
+
+| mode | 召回 | token | 延迟 |
+|------|------|-------|------|
+| `graph` | 86% | ~300 | 60–105ms |
+| `both` | 93% | ~2200 | 128–220ms |
+| `vector` | 83% | ~1700 | ~50ms |
+
+> Milvus 冷 collection 首查约 900ms（load 开销），warm 后回到 ~220ms —— 这是
+> `GIT_INDEX_RELEASE_AFTER=true` 换来内存的代价，交互式使用可接受。
 
 ### git-index 服务端仓库配置
 
-在 PhiGent 控制台的「GitLab 仓库」页面（或直接调 `:8795` 管理 API）配置索引仓库列表。git-index 服务会：
+在 PhiGent 控制台的「代码仓库」页面（或直接调 `:8795` 管理 API）配置索引仓库列表。
+仓库地址支持**华为云 CodeHub / GitLab / GitHub**，按填入的 URL 自动选择认证方式（token 或 SSH）。
+git-index 服务会：
 - 每日定时(默认凌晨 3 点)拉取配置的仓库
 - 只索引保护分支（main/master 及 `protectedBranches`），写入 Milvus collection
 - 开发者 `link` 即绑定该 collection 只读检索；本地不产生向量写操作
 
-## 七、目录结构
+## 八、目录结构
 
 ```
 .
@@ -114,6 +161,7 @@ Ollama 地址指向 `http://<宿主机IP>:11435` 即可。
 ├── .env                 # 实际配置(gitignore，含密钥)
 ├── deploy.sh            # 一键部署脚本
 ├── assets/
+│   ├── milvus-user.yaml # Milvus 覆盖配置(mmap；挂载为 /milvus/configs/user.yaml)
 │   └── phigent-env.sh   # PhiGent 启动钩子(注入前端运行时配置)
 ├── images/              # 自建镜像 tar.gz(gitignore)
 │   ├── claude-phigent.tar.gz
@@ -121,7 +169,7 @@ Ollama 地址指向 `http://<宿主机IP>:11435` 即可。
 └── README.md
 ```
 
-## 八、说明
+## 九、说明
 
 - 本仓库为**通用模板**，不含任何具体服务器地址、主机名或真实密钥。
 - `.env` 含密钥，已被 `.gitignore` 忽略，请勿提交。
