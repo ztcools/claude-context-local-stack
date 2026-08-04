@@ -7,18 +7,17 @@
 #   ./push-to-server.sh --dry-run      # 只打印会做什么
 #   ./push-to-server.sh --yes          # 跳过确认（CI 用）
 #
-# 目标机默认 haoming.ju@10.50.4.149:/data1/users/haoming.ju/claude-context/stack
-# 可用环境变量覆盖：REMOTE_USER / REMOTE_HOST / REMOTE_DIR
-#
+# 环境变量（必设）：
+#   REMOTE_USER=yourname  REMOTE_HOST=1.2.3.4  REMOTE_DIR=/path/to/stack
 # 密码只需输一次：脚本用 SSH 连接复用（ControlMaster），后续所有 ssh/scp 走同一条连接。
 # 若已配公钥则完全免密。
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
 
-REMOTE_USER="${REMOTE_USER:-haoming.ju}"
-REMOTE_HOST="${REMOTE_HOST:-10.50.4.149}"
-REMOTE_DIR="${REMOTE_DIR:-/data1/users/haoming.ju/claude-context/stack}"
+REMOTE_USER="${REMOTE_USER:?请设置 REMOTE_USER 环境变量}"
+REMOTE_HOST="${REMOTE_HOST:?请设置 REMOTE_HOST 环境变量}"
+REMOTE_DIR="${REMOTE_DIR:?请设置 REMOTE_DIR 环境变量}"
 
 RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[0;33m'; BLU='\033[0;34m'; NC='\033[0m'
 info() { echo -e "${GRN}[INFO]${NC} $*"; }
@@ -86,7 +85,7 @@ fi
 # ---- 需要补进服务器 .env 的键（缺失才追加，已有的绝不覆盖）------------------
 ENV_KEYS=(
   "GIT_INDEX_CONCURRENCY=6"
-  "GIT_INDEX_RELEASE_AFTER=true"
+  "GIT_INDEX_RELEASE_AFTER=false"
   "MILVUS_MEM_LIMIT=64g"      "MILVUS_CPU_LIMIT=24"
   "OLLAMA_MEM_LIMIT=32g"      "OLLAMA_CPU_LIMIT=16"
   "GIT_INDEX_MEM_LIMIT=16g"   "GIT_INDEX_CPU_LIMIT=12"

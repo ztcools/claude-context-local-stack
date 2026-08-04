@@ -186,10 +186,10 @@ packages/git-index-service  定时索引 ──→ images/claude-git-index.tar.g
 
 ## 部署场景
 
-### 公司服务器（10.50.4.149）
-- 目录：`/data1/users/haoming.ju/claude-context/stack/`
-- 该机另有 30+ 用户容器，运维时**绝不 `docker image prune`**（会误删他人悬空镜像）
-- git-index 以 uid `1015:1015` 运行，SSH 部署公钥已配置到 GitLab
+### 服务器
+- clone 本仓库 → 配 `.env` → `./deploy.sh`
+- 与他人共用机器时：**绝不 `docker image prune`**（会误删他人悬空镜像）
+- git-index 以配置的 `GIT_INDEX_UID:GID` 运行，SSH 部署公钥需配置到 Git 平台
 - 详见 memory：[[git-index-service-deploy]]
 
 ### 开发者本机
