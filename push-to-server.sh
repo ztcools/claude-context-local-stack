@@ -63,7 +63,7 @@ R="$REMOTE_USER@$REMOTE_HOST"
 # =============================================================================
 step "0/6 本机产物自检"
 PUSH_FILES=(images/claude-git-index.tar.gz images/claude-phigent.tar.gz
-            docker-compose.yml assets/milvus-user.yaml deploy.sh)
+            docker-compose.yml assets/milvus-user.yaml assets/phigent-env.sh deploy.sh)
 missing=0
 for f in "${PUSH_FILES[@]}"; do
   if [[ -f "$f" ]]; then
@@ -180,7 +180,7 @@ rsh "mkdir -p '$REMOTE_DIR/images' '$REMOTE_DIR/assets' && ls -d '$REMOTE_DIR'"
 step "2/6 上传（镜像较大，171M + 293M）"
 rcp images/claude-git-index.tar.gz images/claude-phigent.tar.gz "$R:$REMOTE_DIR/images/"
 rcp docker-compose.yml deploy.sh                                "$R:$REMOTE_DIR/"
-rcp assets/milvus-user.yaml                                     "$R:$REMOTE_DIR/assets/"
+rcp assets/milvus-user.yaml assets/phigent-env.sh                  "$R:$REMOTE_DIR/assets/"
 rsh "chmod +x '$REMOTE_DIR/deploy.sh'"
 info "上传完成"
 

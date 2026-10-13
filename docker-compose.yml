@@ -159,6 +159,7 @@ services:
       EMBEDDING_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       EMBEDDING_DIMENSION: ${EMBED_DIMENSION:-768}
       MILVUS_ADDRESS: standalone:19530
+      MILVUS_TOKEN: ${MILVUS_TOKEN:-}
       EMBEDDING_CACHE_ENABLED: "true"
       GIT_INCREMENTAL_ENABLED: "true"
       GIT_LAYERED_ENABLED: "true"
@@ -176,7 +177,7 @@ services:
       GIT_INDEX_CONCURRENCY: ${GIT_INDEX_CONCURRENCY:-6}
       # 每个 collection 写完就从 Milvus 内存里 release(见 milvus-user.yaml 的说明)。
       # 只有在"索引完立刻要搜"的调试场景才需要关掉。
-      GIT_INDEX_RELEASE_AFTER: ${GIT_INDEX_RELEASE_AFTER:-true}
+      GIT_INDEX_RELEASE_AFTER: ${GIT_INDEX_RELEASE_AFTER:-false}
     deploy:
       resources:
         limits:
@@ -199,7 +200,7 @@ services:
       MILVUS_URL: ${MILVUS_URL:-standalone:19530}
       GIT_INDEX_PORT: ${GIT_INDEX_PORT:-8795}
     volumes:
-      - ./assets/phigent-env.sh:/app/build/env.sh:ro
+      - ./assets/phigent-env.sh:/app/dist-client/env.sh:ro
     deploy:
       resources:
         limits:

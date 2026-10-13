@@ -65,7 +65,7 @@ minio ─(healthy)─┘                              phigent
 
 ### 自建镜像来源
 - `claude-phigent:latest` — PhiGent Web 控制台前端
-- `claude-context-git-index:latest` — git-index-service（来自 [../context](../context) 的 `packages/git-index-service`）
+- `claude-context-git-index:latest` — git-indexer（来自 [../context](../context) 的 `packages/git-indexer`）
 - 构建在开发机完成（带美国代理），`docker save|gzip` → sftp 到目标机器 → `docker load`
 
 ### 数据持久化
@@ -81,8 +81,8 @@ minio ─(healthy)─┘                              phigent
 1. **服务端 mmap**（`assets/milvus-user.yaml`）：标量数据/标量索引/growing segment 全 mmap，
    冷数据回落 NVMe；**向量索引（HNSW）刻意留内存**——它决定搜索延迟，mmap 化会让 P99 明显变差。
    `lazyload` 也刻意关闭：省内存但首查要等 segment 换入（默认 30s 超时），交互式 search 不可接受。
-2. **客户端写后 release**（`GIT_INDEX_RELEASE_AFTER=true`）：索引任务不把所有 collection 钉在内存里。
-   代价是冷 collection 首查多约 900ms（load），warm 后 ~220ms。
+2. **写后是否 release**（`GIT_INDEX_RELEASE_AFTER=false` 默认）：默认保留 LOADED，保证索引完可立即搜索；大规模多仓库部署若内存压力大，可改成 `true`，让索引任务写完 collection 后从 Milvus 内存释放。
+   代价是冷 collection 首查需要重新 load（约百毫秒到秒级，取决于集合大小）。
 3. **容器硬上限**（`*_MEM_LIMIT` / `*_CPU_LIMIT`）：任何一个服务失控也压不垮宿主机——
    这台机器与他人共用（其他容器已占近 140 GiB）。
 
@@ -104,7 +104,7 @@ minio ─(healthy)─┘                              phigent
 │   │                     #   Milvus 先读 milvus.yaml 再深合并 user.yaml，
 │   │                     #   所以这里只写要偏离默认的键（mmap 相关）
 │   └── phigent-env.sh   # PhiGent 启动钩子：注入前端运行时配置
-│                         #   → 生成 /app/build/env-config.js
+│                         #   → 生成 /app/dist-client/env-config.js
 │                         #   → 注入 GIT_INDEX_PORT 等浏览器端需要的变量
 ├── images/              # 自建镜像 tar.gz（gitignore，不提交）
 │   ├── claude-phigent.tar.gz
@@ -156,7 +156,7 @@ minio ─(healthy)─┘                              phigent
 | `PHIGENT_PORT` | `18000` | PhiGent Web 控制台端口 |
 | `MILVUS_URL` | `standalone:19530` | PhiGent 连接 Milvus 地址 |
 | `GIT_INDEX_CONCURRENCY` | `6` | 同时索引几个仓库。瓶颈是 Ollama 向量化不是 CPU；6 是实测饱和点（1/3/6/8/12 流 → 27/75/136/140/142 embed/s） |
-| `GIT_INDEX_RELEASE_AFTER` | `true` | 每个 collection 写完即从 Milvus 内存 release |
+| `GIT_INDEX_RELEASE_AFTER` | `false` | 默认索引后保持 LOADED，便于开发者立即搜索；大规模多仓库低内存部署可设 true 写后 release |
 | `MILVUS_MEM_LIMIT` / `MILVUS_CPU_LIMIT` | `64g` / `24` | 最大消耗方；配 mmap 后实际远低于上限 |
 | `OLLAMA_MEM_LIMIT` / `OLLAMA_CPU_LIMIT` | `32g` / `16` | 向量化推理 |
 | `GIT_INDEX_MEM_LIMIT` / `GIT_INDEX_CPU_LIMIT` | `16g` / `12` | 实测单 worker 峰值 ~1 GiB（956 MiB 在堆外，V8 heap 仅 55 MiB），并发 6 最坏 ~6 GiB |
@@ -175,12 +175,12 @@ claude-context (../context)              本仓库 (claude-context-local-stack)
 packages/core         索引引擎          docker-compose.yml   编排部署
 packages/graph        知识图谱          deploy.sh            部署脚本
 packages/mcp          MCP 服务端        .env.example         配置模板
-packages/git-index-service  定时索引 ──→ images/claude-git-index.tar.gz
+packages/git-indexer        定时索引 ──→ images/claude-git-index.tar.gz
                                         assets/phigent-env.sh  PhiGent 启动钩子
 ```
 
 - 本仓库**不包含** claude-context 的任何业务代码
-- 本仓库的 git-index 镜像是从 claude-context 的 `packages/git-index-service` 构建的
+- 本仓库的 git-index 镜像是从 claude-context 的 `packages/git-indexer` 构建的
 - PhiGent 是独立项目（不在 claude-context monorepo 中）
 - MCP 客户端（开发者本机 Cursor/Claude Code）直连本栈的 Milvus + Ollama
 

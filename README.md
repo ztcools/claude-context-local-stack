@@ -1,77 +1,89 @@
-# claude-context · One-click local backend deployment
+# claude-context · 本地后端一键部署
 
-All-in-one backend deployment package for [claude-context](https://github.com/ztcools/claude-context) semantic code search.
+为 [claude-context](https://github.com/ztcools/claude-context) 语义代码检索提供后端一体化部署包。
 
-## Included services
+## 包含服务
 
-| Service | Port | Description |
-|---------|------|-------------|
-| **Milvus** (etcd + MinIO + standalone) | 19530 | Vector database |
-| **Ollama** | 11435 | Embedding inference |
-| **git-index** | 8795 | Scheduled repo pulls → incremental indexing |
-| **PhiGent** | 18000 | Web console: Milvus management + repo config + index tree |
+| 服务 | 端口 | 说明 |
+|------|------|------|
+| **Milvus** (etcd + MinIO + standalone) | 19530 | 向量数据库 |
+| **Ollama** | 11435 | embedding 推理 |
+| **git-index** | 8795 | 定时拉取仓库 → 增量索引 |
+| **PhiGent** | 18000 | Web 控制台：Milvus 管理 + 仓库配置 + 索引树 |
 
-## Prerequisites
+## 前置条件
 
-- Docker 20.10+, and the current user has docker permission
-- GPU deployments require [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html); for CPU-only, remove the `deploy` block for ollama in the compose file
+- Docker 20.10+，当前用户有 docker 权限
+- GPU 部署需安装 [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)；纯 CPU 删掉 compose 中 ollama 的 `deploy` 段即可
 
-## Deploy
+## 部署
 
 ```bash
 git clone https://github.com/ztcools/claude-context-local-stack.git
 cd claude-context-local-stack
 cp .env.example .env
-# edit .env — at least update MINIO_ACCESS_KEY / MINIO_SECRET_KEY
+# 编辑 .env，至少修改 MINIO_ACCESS_KEY / MINIO_SECRET_KEY
 ./deploy.sh
 ```
 
-`deploy.sh` automates: environment checks → data directory creation → image loading → service startup → embedding model pull.
+`deploy.sh` 自动完成：环境校验 → 创建数据目录 → 加载镜像 → 启动服务 → 拉取 embedding 模型。
 
-## Verification
-
-```bash
-curl http://localhost:9091/healthz          # Milvus → OK
-curl http://localhost:8795/health           # git-index → {"status":"ok"}
-docker exec claude-ollama ollama list        # should list nomic-embed-text
-open http://<host-ip>:18000                # PhiGent console
-```
-
-## Configuration
-
-Edit `.env`; full template in `.env.example`. Key items:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `MINIO_ACCESS_KEY` | MinIO credentials | `minioadmin` |
-| `MINIO_SECRET_KEY` | MinIO credentials | `minioadmin` |
-| `EMBED_MODEL` | Embedding model | `nomic-embed-text` |
-| `GIT_INDEX_RELEASE_AFTER` | Keep LOADED after indexing | `false` |
-| `GIT_INDEX_CONCURRENCY` | Parallel index count | `6` |
-| `GIT_SSL_NO_VERIFY` | Skip TLS for self-signed certs | `false` |
-| `MILVUS_URL` | Milvus address used by PhiGent | `standalone:19530` |
-
-## Repo management
-
-Open PhiGent (`:18000`) → connect Milvus → add repos on the "Code Repos" page. Supports Huawei Cloud CodeHub / GitLab / GitHub, auto-detecting platform and auth from the URL. git-index pulls configured branches on a daily schedule and incrementally indexes them into Milvus.
-
-## Common commands
+## 验证
 
 ```bash
-./deploy.sh          # deploy/update
-./deploy.sh status   # container status
-./deploy.sh logs     # tail logs
-./deploy.sh down     # stop and remove containers (data kept)
+curl http://localhost:9091/healthz           # Milvus → OK
+curl http://localhost:8795/health            # git-index → {"status":"ok"}
+docker exec claude-ollama ollama list        # 应有 nomic-embed-text
+open http://<宿主机IP>:18000                 # PhiGent 控制台
 ```
 
-## Directory structure
+## 配置
+
+编辑 `.env`，完整模板见 `.env.example`。关键项：
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `MINIO_ACCESS_KEY` | MinIO 凭据 | `minioadmin` |
+| `MINIO_SECRET_KEY` | MinIO 凭据 | `minioadmin` |
+| `EMBED_MODEL` | embedding 模型 | `nomic-embed-text` |
+| `GIT_INDEX_RELEASE_AFTER` | `false`=索引后保持 LOADED；大规模多仓库低内存部署可设 `true` 写后 release | `false` |
+| `GIT_INDEX_CONCURRENCY` | 并行索引数 | `6` |
+| `GIT_SSL_NO_VERIFY` | 自签证书跳过 TLS | `false` |
+| `MILVUS_URL` | PhiGent 连 Milvus 地址 | `standalone:19530` |
+| `MILVUS_TOKEN` | git-index 连接 Milvus 的 token（本地默认留空） | 空 |
+
+## 仓库管理
+
+打开 PhiGent（`:18000`）→ 连接 Milvus → 「代码仓库」页面添加仓库。支持华为云 CodeHub / GitLab / GitHub，按 URL 自动识别平台和认证方式。git-index 每日定时拉取配置的分支并增量索引入 Milvus。
+
+## 常用命令
+
+```bash
+./deploy.sh          # 部署/更新
+./deploy.sh status   # 容器状态
+./deploy.sh logs     # 跟踪日志
+./deploy.sh down     # 停止并移除容器（数据保留）
+```
+
+推到远程服务器（在**本机**运行，不是服务器）：
+
+```bash
+cp .env.company.example .env.company   # 填写 REMOTE_USER / REMOTE_HOST / REMOTE_DIR
+source .env.company
+./push-to-server.sh                # 上传 → 补 .env → load 镜像 → 重建 → 验证
+./push-to-server.sh --verify-only  # 只跑只读验证，不改服务器
+./push-to-server.sh --dry-run      # 只打印会做什么
+```
+
+## 目录结构
 
 ```
 .
-├── docker-compose.yml    # 6-container orchestration
-├── .env.example          # config template
-├── deploy.sh             # deploy script
-├── assets/               # Milvus config + PhiGent startup hook
-├── images/               # self-built images (gitignored)
+├── docker-compose.yml    # 6 容器编排
+├── .env.example          # 配置模板
+├── deploy.sh             # 部署脚本（服务器端入口）
+├── push-to-server.sh     # 本机 → 服务器 推送/重建脚本
+├── assets/               # Milvus 配置 + PhiGent 启动钩子
+├── images/               # 自建镜像（gitignore）
 └── README.md
 ```
